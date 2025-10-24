@@ -70,10 +70,8 @@ class LocalRuntime(DockerRuntime):
         else:
             self.logger = logger
 
-        # Initialize the environment
-        self.setup_env()
-        self.logger.info("local environment initialized")
-        self.logger.info("repo name: %s", self.repo_name)
+        # Don't call self.setup_env() here because we call it separately, after the patch has been applied.
+        # This is because the patch may include the R2E-Gym files, which setup_env() then wants to move around.
 
     @staticmethod
     def _get_container_name(image_name: str) -> str:
@@ -104,7 +102,8 @@ class LocalRuntime(DockerRuntime):
     ) -> tuple[str, str]:
         raise NotImplementedError
 
-    # Copied from https://github.com/Kipok/SWE-bench/blob/60171e7869d6d05dd3320176235fa919c955bc25/swebench/harness/run_local_evaluation.py
+    # Based on https://github.com/Kipok/SWE-bench/blob/60171e7869d6d05dd3320176235fa919c955bc25/swebench/harness/run_local_evaluation.py
+    # but returns exit code instead of execution duration
     @staticmethod
     def _exec_run_with_timeout(cmd, timeout: int | None = 60):
         """
@@ -137,7 +136,6 @@ class LocalRuntime(DockerRuntime):
 
         # Start the command in a separate thread
         thread = threading.Thread(target=run_command)
-        start_time = time.time()
         thread.start()
         thread.join(timeout)
 
@@ -155,8 +153,8 @@ class LocalRuntime(DockerRuntime):
                     process.kill()
                     process.wait()
             timed_out = True
-        end_time = time.time()
-        return exec_result.decode(), timed_out, end_time - start_time
+
+        return exec_result.decode(), timed_out, process.returncode
 
     def run(
         self,
@@ -180,15 +178,19 @@ class LocalRuntime(DockerRuntime):
         timeout_cmd = f"timeout {timeout} {exec_code} {args}"
         full_cmd = f"cd {exec_workdir} && PATH={DOCKER_PATH} /bin/sh -c {shlex.quote(timeout_cmd)}"
         try:
-            output, timed_out, _ = self._exec_run_with_timeout(full_cmd, timeout + 5)
+            output, timed_out, exit_code = self._exec_run_with_timeout(full_cmd, timeout + 5)
 
             if timed_out:
-                self.logger.error(f"Internal Timeout: {timeout}s")
+                self.logger.error(f"Internal Timeout: {timeout}s. Command: {full_cmd}")
                 return f"The command took too long to execute (>{timeout}s)", "-1"
 
-            # Remove ANSI escape codes and \r characters
+             # Remove ANSI escape codes and \r characters
             output = re.sub(r"\x1b\[[0-9;]*m|\r", "", output)
-            return output, "0"
+
+            if exit_code != 0:
+                self.logger.error(f"Command failed with exit code {exit_code}. Command: {full_cmd}. Output:\n{output}")
+
+            return output, str(exit_code)
 
         except Exception as e:
             return f"Error: {repr(e)}", "-1"

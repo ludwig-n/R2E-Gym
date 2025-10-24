@@ -6,6 +6,66 @@ from r2egym.agenthub.runtime.local import LocalRuntime
 from r2egym.commit_models.diff_classes import ParsedCommit
 
 
+def evaluate(args) -> tuple[dict[str, bool], str | None]:
+    """Returns a tuple of the evaluation report and the test output if available."""
+    with open(args.dataset, "r") as fin:
+        for line in fin:
+            row = json.loads(line)
+            if row["instance_id"] == args.instance_id:
+                dataset_row = row
+                break
+        else:
+            raise ValueError(f"Could not find instance_id {args.instance_id} in dataset {args.dataset}")
+
+    if args.predictions_path == "gold":
+        commit = ParsedCommit(**json.loads(dataset_row["parsed_commit_content"]))
+        patch = commit.get_patch()
+    else:
+        with open(args.predictions_path, "r") as fin:
+            for line in fin:
+                row = json.loads(line)
+                if row["instance_id"] == args.instance_id:
+                    patch = row["model_patch"]
+                    break
+            else:
+                raise ValueError(
+                    f"Could not find instance_id {args.instance_id} in predictions file {args.predictions_path}"
+                )
+
+    if patch is None or not patch.strip():
+        print("Empty patch.")
+        return {"resolved": False, "patch_exists": False, "patch_successfully_applied": False}, None
+
+    runtime = LocalRuntime(dataset_row)
+
+    print("Applying patch...")
+    _, exit_code = runtime.apply_patch(patch)
+
+    if exit_code != "0":
+        # This can happen if the patch includes untracked R2E-Gym files
+        # that are in /testbed when the container starts, but not actually part of the repo (e.g. run_tests.sh).
+        # Then the patch fails to apply because these files are already present.
+        # We attempt to remove these files first, then apply the patch again.
+        print("Failed to apply patch. Trying to remove untracked files from /testbed first.")
+        _, exit_code = runtime.run("git clean -fd")
+
+        if exit_code != "0":
+            print("Failed to remove untracked files from /testbed.")
+            return {"resolved": False, "patch_exists": True, "patch_successfully_applied": False}, None
+
+        _, exit_code = runtime.apply_patch(patch)
+
+        if exit_code != "0":
+            print("Failed to apply patch even after removing the untracked files.")
+            return {"resolved": False, "patch_exists": True, "patch_successfully_applied": False}, None
+
+    print("Patch applied successfully. Running evaluation...")
+    runtime.setup_env()
+    reward, test_output = runtime._calculate_reward(get_test_output=True, timeout=args.timeout)
+    resolved = bool(reward)  # reward is always 1 or 0
+    return {"resolved": resolved, "patch_exists": True, "patch_successfully_applied": True}, test_output
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run evaluation harness for the given dataset and prediction.")
 
@@ -47,49 +107,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    with open(args.dataset, "r") as fin:
-        for line in fin:
-            row = json.loads(line)
-            if row["instance_id"] == args.instance_id:
-                dataset_row = row
-                break
-        else:
-            raise ValueError(f"Could not find instance_id {args.instance_id} in dataset {args.dataset}")
-
-    if args.predictions_path == "gold":
-        commit = ParsedCommit(**json.loads(dataset_row["parsed_commit_content"]))
-        patch = commit.get_patch()
-    else:
-        with open(args.predictions_path, "r") as fin:
-            for line in fin:
-                row = json.loads(line)
-                if row["instance_id"] == args.instance_id:
-                    patch = row["model_patch"]
-                    break
-            else:
-                raise ValueError(
-                    f"Could not find instance_id {args.instance_id} in predictions file {args.predictions_path}"
-                )
-
-    test_output = None
-
-    if not patch:
-        print("Empty patch.")
-        report = {"resolved": False, "patch_exists": False, "patch_successfully_applied": False}
-    else:
-        runtime = LocalRuntime(dataset_row)
-
-        print("Applying patch...")
-        apply_patch_output, exit_code = runtime.apply_patch(patch)
-
-        if exit_code != "0":
-            print(f"Patch application failed. Exit code: {exit_code}. Output:\n{apply_patch_output}")
-            report = {"resolved": False, "patch_exists": True, "patch_successfully_applied": False}
-        else:
-            print("Patch applied successfully. Running evaluation...")
-            reward, test_output = runtime._calculate_reward(get_test_output=True, timeout=args.timeout)
-            resolved = bool(reward)    # reward is always 1 or 0
-            report = {"resolved": resolved, "patch_exists": True, "patch_successfully_applied": True}
+    report, test_output = evaluate(args)
 
     report_json = json.dumps({args.instance_id: report})
     print(f"Evaluation complete. Report: {report_json}")
