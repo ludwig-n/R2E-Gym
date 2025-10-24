@@ -71,7 +71,8 @@ class LocalRuntime(DockerRuntime):
             self.logger = logger
 
         # Don't call self.setup_env() here because we call it separately, after the patch has been applied.
-        # This is because the patch may include the R2E-Gym files, which setup_env() then wants to move around.
+        # This is because setup_env() moves some R2E-Gym files around,
+        # and we want to apply the patch to the original state of /testbed when the container starts.
 
     @staticmethod
     def _get_container_name(image_name: str) -> str:

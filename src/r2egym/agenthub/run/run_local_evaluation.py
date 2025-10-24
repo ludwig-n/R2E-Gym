@@ -38,26 +38,28 @@ def evaluate(args) -> tuple[dict[str, bool], str | None]:
 
     runtime = LocalRuntime(dataset_row)
 
-    print("Applying patch...")
-    _, exit_code = runtime.apply_patch(patch)
+    # The patch may include untracked R2E-Gym files
+    # that are in /testbed when the container starts, but not actually part of the repo (e.g. run_tests.sh).
+    # Any changes to these files are ignored using the `--exclude` option of `git apply`.
 
+    print("Getting untracked files from /testbed...")
+    git_ls_output, exit_code = runtime.run("git ls-files --others --exclude-standard")
     if exit_code != "0":
-        # This can happen if the patch includes untracked R2E-Gym files
-        # that are in /testbed when the container starts, but not actually part of the repo (e.g. run_tests.sh).
-        # Then the patch fails to apply because these files are already present.
-        # We attempt to remove these files first, then apply the patch again.
-        print("Failed to apply patch. Trying to remove untracked files from /testbed first.")
-        _, exit_code = runtime.run("git clean -fd")
+        print("Failed to get untracked files from /testbed.")
+        return {"resolved": False, "patch_exists": True, "patch_successfully_applied": False}, None
 
-        if exit_code != "0":
-            print("Failed to remove untracked files from /testbed.")
-            return {"resolved": False, "patch_exists": True, "patch_successfully_applied": False}, None
+    untracked_files = [file.strip() for file in git_ls_output.split()]
+    exclude_str = " ".join(f"--exclude={file}" for file in untracked_files)
 
-        _, exit_code = runtime.apply_patch(patch)
+    patch_path = f"/tmp/{args.instance_id}.patch"
+    pathlib.Path(patch_path).write_text(patch)
 
-        if exit_code != "0":
-            print("Failed to apply patch even after removing the untracked files.")
-            return {"resolved": False, "patch_exists": True, "patch_successfully_applied": False}, None
+    apply_patch_command = f"git apply --whitespace=fix {exclude_str} {patch_path}"
+    print(f"Applying patch... Command: {apply_patch_command}")
+    _, exit_code = runtime.run(apply_patch_command)
+    if exit_code != "0":
+        print("Failed to apply patch.")
+        return {"resolved": False, "patch_exists": True, "patch_successfully_applied": False}, None
 
     print("Patch applied successfully. Running evaluation...")
     runtime.setup_env()
