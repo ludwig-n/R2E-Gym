@@ -20,6 +20,8 @@ def evaluate(args) -> tuple[dict[str, bool], str | None]:
     if args.predictions_path == "gold":
         commit = ParsedCommit(**json.loads(dataset_row["parsed_commit_content"]))
         patch = commit.get_patch()
+    elif args.predictions_path == "empty":
+        patch = None
     else:
         with open(args.predictions_path, "r") as fin:
             for line in fin:
@@ -31,37 +33,38 @@ def evaluate(args) -> tuple[dict[str, bool], str | None]:
                 raise ValueError(
                     f"Could not find instance_id {args.instance_id} in predictions file {args.predictions_path}"
                 )
-
-    if patch is None or not patch.strip():
-        print("Empty patch.")
-        return {"resolved": False, "patch_exists": False, "patch_successfully_applied": False}, None
+        if patch is None or not patch.strip():
+            print("Empty patch.")
+            return {"resolved": False, "patch_exists": False, "patch_successfully_applied": False}, None
 
     runtime = LocalRuntime(dataset_row)
 
-    # The patch may include untracked R2E-Gym files
-    # that are in /testbed when the container starts, but not actually part of the repo (e.g. run_tests.sh).
-    # Any changes to these files are ignored using the `--exclude` option of `git apply`.
+    if args.predictions_path != "empty":
+        # The patch may include untracked R2E-Gym files
+        # that are in /testbed when the container starts, but not actually part of the repo (e.g. run_tests.sh).
+        # Any changes to these files are ignored using the `--exclude` option of `git apply`.
 
-    print("Getting untracked files from /testbed...")
-    git_ls_output, exit_code = runtime.run("git ls-files --others --exclude-standard")
-    if exit_code != "0":
-        print("Failed to get untracked files from /testbed.")
-        return {"resolved": False, "patch_exists": True, "patch_successfully_applied": False}, None
+        print("Getting untracked files from /testbed...")
+        git_ls_output, exit_code = runtime.run("git ls-files --others --exclude-standard")
+        if exit_code != "0":
+            print("Failed to get untracked files from /testbed.")
+            return {"resolved": False, "patch_exists": True, "patch_successfully_applied": False}, None
 
-    untracked_files = [file.strip() for file in git_ls_output.split()]
-    exclude_str = " ".join(f"--exclude={file}" for file in untracked_files)
+        untracked_files = [file.strip() for file in git_ls_output.split()]
+        exclude_str = " ".join(f"--exclude={file}" for file in untracked_files)
 
-    patch_path = f"/tmp/{args.instance_id}.patch"
-    pathlib.Path(patch_path).write_text(patch)
+        patch_path = f"/tmp/{args.instance_id}.patch"
+        pathlib.Path(patch_path).write_text(patch)
 
-    apply_patch_command = f"git apply --whitespace=fix {exclude_str} {patch_path}"
-    print(f"Applying patch... Command: {apply_patch_command}")
-    _, exit_code = runtime.run(apply_patch_command)
-    if exit_code != "0":
-        print("Failed to apply patch.")
-        return {"resolved": False, "patch_exists": True, "patch_successfully_applied": False}, None
+        apply_patch_command = f"git apply --whitespace=fix {exclude_str} {patch_path}"
+        print(f"Applying patch... Command: {apply_patch_command}")
+        _, exit_code = runtime.run(apply_patch_command)
+        if exit_code != "0":
+            print("Failed to apply patch.")
+            return {"resolved": False, "patch_exists": True, "patch_successfully_applied": False}, None
 
-    print("Patch applied successfully. Running evaluation...")
+        print("Patch applied successfully. Running evaluation...")
+
     runtime.setup_env()
     reward, test_output = runtime._calculate_reward(get_test_output=True, timeout=args.timeout)
     resolved = bool(reward)  # reward is always 1 or 0
@@ -89,7 +92,11 @@ if __name__ == "__main__":
         "-p",
         "--predictions_path",
         type=str,
-        help="Path to predictions file in SWE-bench format - if 'gold', uses gold predictions",
+        help=(
+            "Path to the predictions file in SWE-bench format. "
+            "If 'gold', uses the gold patch for this instance. "
+            "If 'empty', uses an empty patch."
+        ),
         required=True,
     )
     parser.add_argument(
